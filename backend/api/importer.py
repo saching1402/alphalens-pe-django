@@ -1,9 +1,3 @@
-"""
-Excel importer — reads the PE fund manager workbook and upserts into DB.
-Expected sheets:
-  - Sheet with fund-level data (IRR, TVPI, DPI, etc.)
-  - 'Consol View' tab with manager-level AUM, description, PB score
-"""
 import pandas as pd
 from decimal import Decimal, InvalidOperation
 from .models import FundManager, Fund
@@ -13,8 +7,8 @@ def _dec(val):
     if pd.isna(val) or val is None or val == '':
         return None
     try:
-        return Decimal(str(val)).quantize(Decimal('0.001'))
-    except InvalidOperation:
+        return Decimal(str(round(float(val), 4)))
+    except (InvalidOperation, ValueError):
         return None
 
 
@@ -22,75 +16,88 @@ def _int(val):
     if pd.isna(val) or val is None or val == '':
         return None
     try:
-        return int(val)
+        return int(float(val))
     except (ValueError, TypeError):
         return None
 
 
 def import_excel_file(file_obj):
     xf = pd.ExcelFile(file_obj)
-    sheets = xf.sheet_names
     results = {'managers_created': 0, 'managers_updated': 0,
                'funds_created': 0, 'funds_updated': 0, 'errors': []}
 
-    # Try to find fund sheet (not Consol View)
-    fund_sheet = next((s for s in sheets if 'consol' not in s.lower()), sheets[0])
-    df_funds = xf.parse(fund_sheet)
-    df_funds.columns = [str(c).strip() for c in df_funds.columns]
+    df = xf.parse(xf.sheet_names[0])
+    df.columns = [str(c).strip() for c in df.columns]
 
-    # Column name mappings (flexible)
     COL_MAP = {
+        'Masked Investor Name': 'manager_name',
         'Fund Manager': 'manager_name',
         'Manager': 'manager_name',
+        'Investor Name': 'manager_name',
+        'Masked Fund Name': 'fund_name',
         'Fund Name': 'fund_name',
         'Fund': 'fund_name',
+        'Fund ID': 'fund_id_raw',
         'Vintage': 'vintage',
-        'Fund Size (USD M)': 'fund_size_usd_m',
         'Fund Size': 'fund_size_usd_m',
-        'IRR (%)': 'irr',
+        'Fund Size (USD M)': 'fund_size_usd_m',
+        'Fund Size (USD Mn)': 'fund_size_usd_m',
+        'Fund Type': 'fund_type',
+        'Investments': 'investments',
+        'Total Investments': 'total_investments',
         'IRR': 'irr',
         'Net IRR': 'irr',
         'TVPI': 'tvpi',
-        'DPI': 'dpi',
         'RVPI': 'rvpi',
+        'DPI': 'dpi',
         'MOIC': 'moic',
         'Fund Quartile': 'fund_quartile',
-        'Quartile': 'fund_quartile',
+        'IRR Benchmark*': 'irr_benchmark',
         'IRR Benchmark': 'irr_benchmark',
-        'Benchmark IRR': 'irr_benchmark',
+        'TVPI Benchmark*': 'tvpi_benchmark',
         'TVPI Benchmark': 'tvpi_benchmark',
+        'DPI Benchmark*': 'dpi_benchmark',
         'DPI Benchmark': 'dpi_benchmark',
-        'Strategy': 'strategy',
-        'Fund Type': 'fund_type',
+        'As of Quarter': 'as_of_quarter',
+        'As of Year': 'as_of_year',
+        'Preferred Geography': 'geography',
         'Geography': 'geography',
+        'Preferred Industry': 'sector_focus',
         'Sector Focus': 'sector_focus',
-        'No. of Investments': 'investments',
-        'Investments': 'investments',
+        'Strategy': 'strategy',
+        'AUM (USD M)': 'aum_usd_m',
+        'PB Score': 'pb_score',
+        'Description': 'description',
+        'Year Founded': 'year_founded',
+        'Segment': 'segment',
     }
 
-    df_funds.rename(columns=COL_MAP, inplace=True)
+    df.rename(columns=COL_MAP, inplace=True)
 
-    for _, row in df_funds.iterrows():
+    if 'manager_name' not in df.columns:
+        return {'error': 'Cannot find manager column. Columns found: ' + str(list(df.columns))}
+
+    for _, row in df.iterrows():
         manager_name = str(row.get('manager_name', '')).strip()
         fund_name = str(row.get('fund_name', '')).strip()
-        if not manager_name or not fund_name or manager_name == 'nan':
+
+        if not manager_name or manager_name in ('nan', 'None', ''):
             continue
 
-        strategy = str(row.get('strategy', '')).strip() or None
-        if strategy and strategy not in ('MM', 'LMM'):
-            strategy = None
-
-        manager, created = FundManager.objects.get_or_create(
-            name=manager_name,
-            defaults={'strategy': strategy}
-        )
+        manager, created = FundManager.objects.get_or_create(name=manager_name)
         if created:
             results['managers_created'] += 1
         else:
             results['managers_updated'] += 1
 
+        if not fund_name or fund_name in ('nan', 'None', ''):
+            continue
+
         fund_id_raw = str(row.get('fund_id_raw', '')).strip() or None
-        fund_defaults = {
+        if fund_id_raw in ('nan', 'None', ''):
+            fund_id_raw = None
+
+        fd = {
             'manager': manager,
             'vintage': _int(row.get('vintage')),
             'fund_size_usd_m': _dec(row.get('fund_size_usd_m')),
@@ -105,53 +112,31 @@ def import_excel_file(file_obj):
             'irr_benchmark': _dec(row.get('irr_benchmark')),
             'tvpi_benchmark': _dec(row.get('tvpi_benchmark')),
             'dpi_benchmark': _dec(row.get('dpi_benchmark')),
+            'as_of_quarter': str(row.get('as_of_quarter', '')).strip() or None,
+            'as_of_year': _int(row.get('as_of_year')),
             'geography': str(row.get('geography', '')).strip() or None,
             'sector_focus': str(row.get('sector_focus', '')).strip() or None,
         }
+        for k, v in list(fd.items()):
+            if v in ('nan', 'None'):
+                fd[k] = None
 
-        if fund_id_raw:
-            fund, f_created = Fund.objects.update_or_create(
-                fund_id_raw=fund_id_raw,
-                defaults={'fund_name': fund_name, **fund_defaults}
-            )
-        else:
-            fund, f_created = Fund.objects.update_or_create(
-                fund_name=fund_name, manager=manager,
-                defaults=fund_defaults
-            )
-
-        if f_created:
-            results['funds_created'] += 1
-        else:
-            results['funds_updated'] += 1
-
-    # Consol View — update manager-level fields
-    if 'Consol View' in sheets:
-        df_consol = xf.parse('Consol View')
-        df_consol.columns = [str(c).strip() for c in df_consol.columns]
-        CONSOL_MAP = {
-            'Fund Manager': 'name', 'Manager': 'name',
-            'AUM (USD M)': 'aum_usd_m', 'AUM': 'aum_usd_m',
-            'PB Score': 'pb_score', 'Description': 'description',
-            'Year Founded': 'year_founded', 'Segment': 'segment',
-        }
-        df_consol.rename(columns=CONSOL_MAP, inplace=True)
-        for _, row in df_consol.iterrows():
-            name = str(row.get('name', '')).strip()
-            if not name or name == 'nan':
-                continue
-            updates = {}
-            if 'aum_usd_m' in df_consol.columns:
-                updates['aum_usd_m'] = _dec(row.get('aum_usd_m'))
-            if 'pb_score' in df_consol.columns:
-                updates['pb_score'] = _dec(row.get('pb_score'))
-            if 'description' in df_consol.columns:
-                desc = str(row.get('description', '')).strip()
-                if desc and desc != 'nan':
-                    updates['description'] = desc
-            if 'year_founded' in df_consol.columns:
-                updates['year_founded'] = _int(row.get('year_founded'))
-            if updates:
-                FundManager.objects.filter(name=name).update(**updates)
+        try:
+            if fund_id_raw:
+                f, c = Fund.objects.update_or_create(
+                    fund_id_raw=fund_id_raw,
+                    defaults={'fund_name': fund_name, **fd}
+                )
+            else:
+                f, c = Fund.objects.update_or_create(
+                    fund_name=fund_name, manager=manager,
+                    defaults=fd
+                )
+            if c:
+                results['funds_created'] += 1
+            else:
+                results['funds_updated'] += 1
+        except Exception as e:
+            results['errors'].append(str(e)[:100])
 
     return results
