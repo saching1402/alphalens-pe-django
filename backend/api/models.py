@@ -53,7 +53,7 @@ class Fund(models.Model):
 
     class Meta:
         db_table = 'funds'
-        ordering = ['manager__name', 'fund_name']
+
 
     def __str__(self):
         return self.fund_name
