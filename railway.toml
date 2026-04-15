@@ -1,0 +1,15 @@
+# Root railway.toml — points to backend by default
+# For frontend, create a second Railway service pointing to frontend/
+
+[build]
+  builder = "DOCKERFILE"
+  dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+  startCommand = "python manage.py migrate && gunicorn alphalens.wsgi:application --bind 0.0.0.0:$PORT --workers 2"
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyMaxRetries = 3
+
+[healthcheck]
+  path = "/health"
+  timeout = 30

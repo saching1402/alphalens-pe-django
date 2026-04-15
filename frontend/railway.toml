@@ -1,0 +1,12 @@
+# Frontend Railway service config
+[build]
+  builder = "DOCKERFILE"
+  dockerfilePath = "Dockerfile"
+
+[deploy]
+  restartPolicyType = "ON_FAILURE"
+
+[build.args]
+  VITE_API_URL = ""
+  # Set VITE_API_URL in Railway dashboard to your backend URL
+  # e.g. https://alphalens-backend.up.railway.app
